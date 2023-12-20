@@ -15,118 +15,123 @@ use staging_xcm_builder::{
 use staging_xcm_executor::traits::{ConvertLocation, Properties, ShouldExecute};
 use std::{cell::Cell, marker::PhantomData, ops::ControlFlow};
 
-pub struct NewWithComputedOrigin<InnerBarrier, LocalUniversal, MaxPrefixes>(
-    PhantomData<(InnerBarrier, LocalUniversal, MaxPrefixes)>,
-);
+use rfc_34_code::*;
 
-impl<
-        InnerBarrier: ShouldExecute,
-        LocalUniversal: Get<InteriorMultiLocation>,
-        MaxPrefixes: Get<u32>,
-    > ShouldExecute for NewWithComputedOrigin<InnerBarrier, LocalUniversal, MaxPrefixes>
-{
-    fn should_execute<Call>(
-        origin: &MultiLocation,
-        instructions: &mut [Instruction<Call>],
-        max_weight: Weight,
-        properties: &mut Properties,
-    ) -> Result<(), ProcessMessageError> {
-        let mut actual_origin = *origin;
-        let skipped = Cell::new(0usize);
-        instructions.matcher().match_next_inst_while(
-            |_| skipped.get() < MaxPrefixes::get() as usize,
-            |inst| {
-                match inst {
-                    UniversalOrigin(new_global) => {
-                        // ↓↓ ORIGINAL CODE ↓↓
+pub mod rfc_34_code {
+    use super::*;
 
-                        // Note the origin is *relative to local consensus*! So we need to escape
-                        // local consensus with the `parents` before diving in into the
-                        // `universal_location`.
-                        // actual_origin = X1(*new_global).relative_to(&LocalUniversal::get());
+    pub struct NewWithComputedOrigin<InnerBarrier, LocalUniversal, MaxPrefixes>(
+        PhantomData<(InnerBarrier, LocalUniversal, MaxPrefixes)>,
+    );
 
-                        // ↑↑ ORIGINAL CODE ↑↑
+    impl<
+            InnerBarrier: ShouldExecute,
+            LocalUniversal: Get<InteriorMultiLocation>,
+            MaxPrefixes: Get<u32>,
+        > ShouldExecute for NewWithComputedOrigin<InnerBarrier, LocalUniversal, MaxPrefixes>
+    {
+        fn should_execute<Call>(
+            origin: &MultiLocation,
+            instructions: &mut [Instruction<Call>],
+            max_weight: Weight,
+            properties: &mut Properties,
+        ) -> Result<(), ProcessMessageError> {
+            let mut actual_origin = *origin;
+            let skipped = Cell::new(0usize);
+            instructions.matcher().match_next_inst_while(
+                |_| skipped.get() < MaxPrefixes::get() as usize,
+                |inst| {
+                    match inst {
+                        UniversalOrigin(new_global) => {
+                            // ↓↓ ORIGINAL CODE ↓↓
 
-                        // ↓↓ NEW CODE ↓↓
+                            // actual_origin = X1(*new_global).relative_to(&LocalUniversal::get());
 
-                        actual_origin = X1(GlobalConsensus(
-                            LocalUniversal::get()
-                                .global_consensus()
-                                .map_err(|_| ProcessMessageError::Unsupported)?,
-                        ))
-                        .within_global(
-                            actual_origin
-                                .prepended_with(LocalUniversal::get().relative_to(&X1(*new_global)))
-                                .map_err(|_| ProcessMessageError::Unsupported)?,
-                        )
-                        .map_err(|_| ProcessMessageError::Unsupported)?
-                        .into_location();
+                            // ↑↑ ORIGINAL CODE ↑↑
 
-                        // ↑↑ NEW CODE ↑↑
-                    }
-                    DescendOrigin(j) => {
-                        let Ok(_) = actual_origin.append_with(*j) else {
-                            return Err(ProcessMessageError::Unsupported);
-                        };
-                    }
-                    _ => return Ok(ControlFlow::Break(())),
-                };
-                skipped.set(skipped.get() + 1);
-                Ok(ControlFlow::Continue(()))
-            },
-        )?;
-        InnerBarrier::should_execute(
-            &actual_origin,
-            &mut instructions[skipped.get()..],
-            max_weight,
-            properties,
-        )
-    }
-}
+                            // ↓↓ NEW CODE ↓↓
 
-pub struct NewDescribeFamily<DescribeInterior>(PhantomData<DescribeInterior>);
-impl<Suffix: DescribeLocation> DescribeLocation for NewDescribeFamily<Suffix> {
-    fn describe_location(l: &MultiLocation) -> Option<Vec<u8>> {
-        match (l.parents, l.interior.first()) {
-            (0, Some(Parachain(index))) => {
-                let tail = l.interior.split_first().0;
-                let interior = Suffix::describe_location(&tail.into())?;
-                Some((b"ChildChain", Compact::<u32>::from(*index), interior).encode())
-            }
-            (1, Some(Parachain(index))) => {
-                let tail = l.interior.split_first().0;
-                let interior = Suffix::describe_location(&tail.into())?;
-                Some((b"SiblingChain", Compact::<u32>::from(*index), interior).encode())
-            }
-            (1, _) => {
-                let tail = l.interior.into();
-                let interior = Suffix::describe_location(&tail)?;
-                Some((b"ParentChain", interior).encode())
-            }
-
-            // ↓↓ NEW CODE ↓↓
-            (0, Some(GlobalConsensus(network_id))) => {
-                let tail = l.interior.split_first().0;
-                match tail.first() {
-                    Some(Parachain(index)) => {
-                        let tail = tail.split_first().0;
-                        let interior = Suffix::describe_location(&tail.into())?;
-                        Some(
-                            (
-                                b"UniversalLocation",
-                                *network_id,
-                                b"Parachain",
-                                Compact::<u32>::from(*index),
-                                interior,
+                            actual_origin = X1(GlobalConsensus(
+                                LocalUniversal::get()
+                                    .global_consensus()
+                                    .map_err(|_| ProcessMessageError::Unsupported)?,
+                            ))
+                            .within_global(
+                                actual_origin
+                                    .prepended_with(
+                                        LocalUniversal::get().relative_to(&X1(*new_global)),
+                                    )
+                                    .map_err(|_| ProcessMessageError::Unsupported)?,
                             )
-                                .encode(),
-                        )
-                    }
-                    _ => return None,
+                            .map_err(|_| ProcessMessageError::Unsupported)?
+                            .into_location();
+
+                            // ↑↑ NEW CODE ↑↑
+                        }
+                        DescendOrigin(j) => {
+                            let Ok(_) = actual_origin.append_with(*j) else {
+                                return Err(ProcessMessageError::Unsupported);
+                            };
+                        }
+                        _ => return Ok(ControlFlow::Break(())),
+                    };
+                    skipped.set(skipped.get() + 1);
+                    Ok(ControlFlow::Continue(()))
+                },
+            )?;
+            InnerBarrier::should_execute(
+                &actual_origin,
+                &mut instructions[skipped.get()..],
+                max_weight,
+                properties,
+            )
+        }
+    }
+
+    pub struct NewDescribeFamily<DescribeInterior>(PhantomData<DescribeInterior>);
+    impl<Suffix: DescribeLocation> DescribeLocation for NewDescribeFamily<Suffix> {
+        fn describe_location(l: &MultiLocation) -> Option<Vec<u8>> {
+            match (l.parents, l.interior.first()) {
+                (0, Some(Parachain(index))) => {
+                    let tail = l.interior.split_first().0;
+                    let interior = Suffix::describe_location(&tail.into())?;
+                    Some((b"ChildChain", Compact::<u32>::from(*index), interior).encode())
                 }
+                (1, Some(Parachain(index))) => {
+                    let tail = l.interior.split_first().0;
+                    let interior = Suffix::describe_location(&tail.into())?;
+                    Some((b"SiblingChain", Compact::<u32>::from(*index), interior).encode())
+                }
+                (1, _) => {
+                    let tail = l.interior.into();
+                    let interior = Suffix::describe_location(&tail)?;
+                    Some((b"ParentChain", interior).encode())
+                }
+
+                // ↓↓ NEW CODE ↓↓
+                (0, Some(GlobalConsensus(network_id))) => {
+                    let tail = l.interior.split_first().0;
+                    match tail.first() {
+                        Some(Parachain(index)) => {
+                            let tail = tail.split_first().0;
+                            let interior = Suffix::describe_location(&tail.into())?;
+                            Some(
+                                (
+                                    b"UniversalLocation",
+                                    *network_id,
+                                    b"Parachain",
+                                    Compact::<u32>::from(*index),
+                                    interior,
+                                )
+                                    .encode(),
+                            )
+                        }
+                        _ => return None,
+                    }
+                }
+                // ↑↑ NEW CODE ↑↑
+                _ => return None,
             }
-            // ↑↑ NEW CODE ↑↑
-            _ => return None,
         }
     }
 }
