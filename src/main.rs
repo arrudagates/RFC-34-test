@@ -2,14 +2,17 @@ use frame_support::{
     parameter_types,
     traits::{Get, ProcessMessageError},
 };
-use parity_scale_codec::{Compact, Decode, Encode};
+use parity_scale_codec::{Compact, Encode};
 use sp_core::{crypto::AccountId32, ConstU32};
 use staging_xcm::{
     latest::{prelude::*, InteriorMultiLocation, MultiLocation, NetworkId},
     DoubleEncoded,
 };
-use staging_xcm_builder::{CreateMatcher, DescribeAllTerminal, DescribeLocation, MatchXcm};
-use staging_xcm_executor::traits::{Properties, ShouldExecute};
+use staging_xcm_builder::{
+    CreateMatcher, DescribeAllTerminal, DescribeFamily, DescribeLocation, HashedDescription,
+    MatchXcm, WithComputedOrigin,
+};
+use staging_xcm_executor::traits::{ConvertLocation, Properties, ShouldExecute};
 use std::{cell::Cell, marker::PhantomData, ops::ControlFlow};
 
 pub struct NewWithComputedOrigin<InnerBarrier, LocalUniversal, MaxPrefixes>(
@@ -139,6 +142,9 @@ pub type RelayBarrier =
 pub type ParaBarrier =
     NewWithComputedOrigin<DeriveAccountBarrier, ParaUniversalLocation, ConstU32<8>>;
 
+pub type LegacyBarrier =
+    WithComputedOrigin<LegacyDeriveAccountBarrier, RelayUniversalLocation, ConstU32<8>>;
+
 pub struct DeriveAccountBarrier;
 impl ShouldExecute for DeriveAccountBarrier {
     fn should_execute<Call>(
@@ -149,11 +155,31 @@ impl ShouldExecute for DeriveAccountBarrier {
     ) -> Result<(), ProcessMessageError> {
         eprintln!("origin: {:?}", origin);
 
-        let account = AccountId32::decode(
-            &mut NewDescribeFamily::<DescribeAllTerminal>::describe_location(origin)
-                .unwrap()
-                .as_slice(),
-        );
+        let account =
+            HashedDescription::<AccountId32, NewDescribeFamily<DescribeAllTerminal>>::convert_location(
+                origin,
+            ).unwrap();
+
+        eprintln!("account: {:?}", account);
+
+        Ok(())
+    }
+}
+
+pub struct LegacyDeriveAccountBarrier;
+impl ShouldExecute for LegacyDeriveAccountBarrier {
+    fn should_execute<Call>(
+        origin: &MultiLocation,
+        _instructions: &mut [Instruction<Call>],
+        _max_weight: Weight,
+        _properties: &mut Properties,
+    ) -> Result<(), ProcessMessageError> {
+        eprintln!("origin: {:?}", origin);
+
+        let account =
+            HashedDescription::<AccountId32, DescribeFamily<DescribeAllTerminal>>::convert_location(
+                origin,
+            ).unwrap();
 
         eprintln!("account: {:?}", account);
 
@@ -172,7 +198,7 @@ fn main() {
         interior: Junctions::X1(Junction::Parachain(2125)),
     };
 
-    let mut instructions: Vec<Instruction<()>> = vec![
+    let mut instructions_with_universal: Vec<Instruction<()>> = vec![
         Instruction::UniversalOrigin(Junction::GlobalConsensus(NetworkId::Kusama)),
         Instruction::DescendOrigin(Junctions::X1(Junction::Plurality {
             id: BodyId::Index(0),
@@ -185,10 +211,10 @@ fn main() {
         },
     ];
 
-    eprintln!("From the relay:");
+    eprintln!("Absolute account from perspective of the relay:");
     <RelayBarrier as ShouldExecute>::should_execute(
         &origin_from_relay_perspective,
-        &mut instructions,
+        &mut instructions_with_universal,
         Weight::from_parts(100, 100),
         &mut Properties {
             weight_credit: Weight::from_parts(100, 100),
@@ -198,11 +224,119 @@ fn main() {
     .unwrap();
 
     eprintln!();
-    eprintln!("From the para:");
+    eprintln!("Absolute account from perspective of a para:");
 
     <ParaBarrier as ShouldExecute>::should_execute(
         &origin_from_para_perspective,
-        &mut instructions,
+        &mut instructions_with_universal,
+        Weight::from_parts(100, 100),
+        &mut Properties {
+            weight_credit: Weight::from_parts(100, 100),
+            message_id: None,
+        },
+    )
+    .unwrap();
+
+    eprintln!();
+    eprintln!("Proof the changes won't break \"legacy\":");
+
+    let mut instructions_descend_to_account_id: Vec<Instruction<()>> = vec![
+        Instruction::DescendOrigin(Junctions::X1(Junction::AccountId32 {
+            network: None,
+            id: [2u8; 32],
+        })),
+        Instruction::Transact {
+            origin_kind: OriginKind::Native,
+            require_weight_at_most: Weight::from_parts(0, 0),
+            call: <DoubleEncoded<()> as From<Vec<u8>>>::from(Vec::<u8>::new()),
+        },
+    ];
+
+    let mut instructions_descend_to_pallet: Vec<Instruction<()>> = vec![
+        Instruction::DescendOrigin(Junctions::X1(Junction::PalletInstance(42))),
+        Instruction::Transact {
+            origin_kind: OriginKind::Native,
+            require_weight_at_most: Weight::from_parts(0, 0),
+            call: <DoubleEncoded<()> as From<Vec<u8>>>::from(Vec::<u8>::new()),
+        },
+    ];
+
+    let mut instructions_no_descend: Vec<Instruction<()>> = vec![Instruction::Transact {
+        origin_kind: OriginKind::Native,
+        require_weight_at_most: Weight::from_parts(0, 0),
+        call: <DoubleEncoded<()> as From<Vec<u8>>>::from(Vec::<u8>::new()),
+    }];
+
+    eprintln!();
+    eprintln!("\"Legacy\" AccountId32 origin:");
+    <LegacyBarrier as ShouldExecute>::should_execute(
+        &origin_from_relay_perspective,
+        &mut instructions_descend_to_account_id,
+        Weight::from_parts(100, 100),
+        &mut Properties {
+            weight_credit: Weight::from_parts(100, 100),
+            message_id: None,
+        },
+    )
+    .unwrap();
+
+    eprintln!();
+    eprintln!("Post-RFC34 AccountId32 origin:");
+    <RelayBarrier as ShouldExecute>::should_execute(
+        &origin_from_relay_perspective,
+        &mut instructions_descend_to_account_id,
+        Weight::from_parts(100, 100),
+        &mut Properties {
+            weight_credit: Weight::from_parts(100, 100),
+            message_id: None,
+        },
+    )
+    .unwrap();
+
+    eprintln!();
+    eprintln!("\"Legacy\" Pallet origin:");
+    <LegacyBarrier as ShouldExecute>::should_execute(
+        &origin_from_relay_perspective,
+        &mut instructions_descend_to_pallet,
+        Weight::from_parts(100, 100),
+        &mut Properties {
+            weight_credit: Weight::from_parts(100, 100),
+            message_id: None,
+        },
+    )
+    .unwrap();
+
+    eprintln!();
+    eprintln!("Post-RFC34 Pallet origin:");
+    <RelayBarrier as ShouldExecute>::should_execute(
+        &origin_from_relay_perspective,
+        &mut instructions_descend_to_pallet,
+        Weight::from_parts(100, 100),
+        &mut Properties {
+            weight_credit: Weight::from_parts(100, 100),
+            message_id: None,
+        },
+    )
+    .unwrap();
+
+    eprintln!();
+    eprintln!("\"Legacy\" terminal origin:");
+    <LegacyBarrier as ShouldExecute>::should_execute(
+        &origin_from_relay_perspective,
+        &mut instructions_no_descend,
+        Weight::from_parts(100, 100),
+        &mut Properties {
+            weight_credit: Weight::from_parts(100, 100),
+            message_id: None,
+        },
+    )
+    .unwrap();
+
+    eprintln!();
+    eprintln!("Post-RFC34 terminal origin:");
+    <RelayBarrier as ShouldExecute>::should_execute(
+        &origin_from_relay_perspective,
+        &mut instructions_no_descend,
         Weight::from_parts(100, 100),
         &mut Properties {
             weight_credit: Weight::from_parts(100, 100),
